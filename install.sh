@@ -73,6 +73,24 @@ sudo_cmd() {
   fi
 }
 
+# ---------- Executability probe ----------
+# `command -v` only resolves a name on $PATH and checks the +x bit; it never
+# execs, so it cannot see a dead shebang. A pipx venv left behind by a $HOME
+# move is the common case: ~/.local/bin/tldr still resolves and is executable,
+# but its interpreter path is gone and bash reports the misleading
+# "cannot execute: required file not found" at exec time. So actually run the
+# tool. A tool that is present but fails this probe is treated as missing and
+# reinstalled.
+tool_works() {
+  local tool="$1"
+  command -v "$tool" >/dev/null 2>&1 || return 1
+  case "$tool" in
+    tmux) tmux -V    >/dev/null 2>&1 ;;  # tmux has no --version
+    go)   go version >/dev/null 2>&1 ;;  # go uses a subcommand, not a flag
+    *)    "$tool" --version >/dev/null 2>&1 ;;
+  esac
+}
+
 # ---------- Package installation ----------
 # apt-get update only needs to run once per invocation, not once per package.
 APT_UPDATED=0
@@ -160,9 +178,12 @@ install_tool_list() {
   local os; os="$(detect_os)" || return 1
   log "detected OS: $os (mode: $mode)"
   for tool in "${tools[@]}"; do
-    if command -v "$tool" >/dev/null 2>&1; then
+    if tool_works "$tool"; then
       log "✓ $tool already installed ($(command -v "$tool"))"
       continue
+    fi
+    if command -v "$tool" >/dev/null 2>&1; then
+      warn "$tool is on PATH ($(command -v "$tool")) but fails to run; reinstalling"
     fi
     local pkg; pkg="$(pkg_name_for "$os" "$tool")"
     log "installing $tool (package: $pkg)…"
@@ -255,16 +276,26 @@ step_optional() {
 # We install `tldr` (the Python client on PyPI). PATH wiring for ~/.local/bin
 # lives in the shell rc block written by link_shell_rc_paths.
 step_tldr() {
-  if command -v tldr >/dev/null 2>&1; then
+  if tool_works tldr; then
     log "✓ tldr already installed ($(command -v tldr))"
     return
+  fi
+  if command -v tldr >/dev/null 2>&1; then
+    # Present but not runnable: almost always a pipx venv whose shebang points at
+    # a stale $HOME. `pipx reinstall` rebuilds it against the current $HOME.
+    warn "tldr is on PATH ($(command -v tldr)) but fails to run (stale pipx venv?); reinstalling"
+    if command -v pipx >/dev/null 2>&1 && pipx reinstall tldr && tool_works tldr; then
+      log "✓ tldr reinstalled via pipx"
+      return
+    fi
+    warn "pipx reinstall did not fix tldr; falling back to a fresh install"
   fi
   install_tldr_via_pipx || warn "optional tool tldr failed to install, continuing"
 }
 
 install_tldr_via_pipx() {
   local os; os="$(detect_os)" || return 1
-  if ! command -v pipx >/dev/null 2>&1; then
+  if ! tool_works pipx; then
     log "installing pipx (needed for tldr)…"
     # The package is named `pipx` on Debian, RHEL/EPEL and Homebrew alike.
     install_pkg "$os" pipx || { warn "failed to install pipx"; return 1; }
@@ -283,9 +314,13 @@ install_tldr_via_pipx() {
 # PATH wiring lives in bash/.workrc so the login shell picks it up.
 step_go() {
   local existing
-  if existing="$(command -v go 2>/dev/null)"; then
+  existing="$(command -v go 2>/dev/null || true)"
+  if tool_works go; then
     log "✓ go already installed ($existing, $(go version 2>/dev/null))"
     return
+  fi
+  if [[ -n "$existing" ]]; then
+    warn "go is on PATH ($existing) but fails to run; reinstalling from upstream"
   fi
   install_go_from_upstream || warn "optional tool go failed to install, continuing"
 }
