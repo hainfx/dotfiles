@@ -1,0 +1,6 @@
+#! /bin/bash
+
+export PS1="\[\e[1;33m\]\u@\[\e[1;32m\]\H\[\e[31m\]:\w\[\e[31m\]/\[\e[0;37m\]\r\n$ "
+export LS_COLORS="no=00:fi=00:di=01;33:ln=01;36:"
+
+alias f=fzf
