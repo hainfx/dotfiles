@@ -58,11 +58,17 @@ detect_os() {
 # Emit "sudo" when privilege escalation is needed, empty otherwise.
 # macOS is not exempt: `systemsetup -settimezone` and writing /usr/local/go both
 # need root there. Homebrew is the exception and is invoked without $sudo.
+# Returns non-zero (instead of calling die) when escalation is impossible: this
+# runs inside `$(...)`, where die's `exit` would only kill the subshell and let
+# the caller continue with an empty sudo. Callers must use `|| return 1`.
 sudo_cmd() {
   if [[ "$(id -u)" -eq 0 ]]; then
     echo ""
   else
-    command -v sudo >/dev/null 2>&1 || die "need sudo but sudo not installed"
+    if ! command -v sudo >/dev/null 2>&1; then
+      warn "need root privileges but sudo is not installed (run as root)"
+      return 1
+    fi
     echo "sudo"
   fi
 }
@@ -110,7 +116,7 @@ rhel_python_pkg() {
 
 install_pkg() {
   local os="$1" pkg="$2"
-  local sudo; sudo="$(sudo_cmd)"
+  local sudo; sudo="$(sudo_cmd)" || return 1
   case "$os" in
     debian)
       # Server target: DEBIAN_FRONTEND=noninteractive silences debconf prompts
@@ -135,8 +141,14 @@ install_pkg() {
       fi
       ;;
     macos)
-      command -v brew >/dev/null 2>&1 || die "Homebrew not found. Install from https://brew.sh"
+      command -v brew >/dev/null 2>&1 || { warn "Homebrew not found. Install from https://brew.sh"; return 1; }
       brew install "$pkg"
+      ;;
+    *)
+      # Guards against an empty $os from a failed detect_os, which would
+      # otherwise fall through the case and report success without installing.
+      warn "install_pkg: unknown OS '$os'"
+      return 1
       ;;
   esac
 }
@@ -145,7 +157,7 @@ install_pkg() {
 install_tool_list() {
   local mode="$1"; shift
   local tools=("$@")
-  local os; os="$(detect_os)"
+  local os; os="$(detect_os)" || return 1
   log "detected OS: $os (mode: $mode)"
   for tool in "${tools[@]}"; do
     if command -v "$tool" >/dev/null 2>&1; then
@@ -196,8 +208,8 @@ current_timezone() {
 }
 
 set_system_timezone() {
-  local tz="$1" sudo zonefile
-  sudo="$(sudo_cmd)"
+  local tz="$1" sudo zonefile os
+  sudo="$(sudo_cmd)" || return 1
 
   case "$(uname -s)" in
     Linux)
@@ -206,7 +218,14 @@ set_system_timezone() {
         $sudo timedatectl set-timezone "$tz" && return
       fi
       zonefile="/usr/share/zoneinfo/$tz"
-      [[ -f "$zonefile" ]] || { warn "zoneinfo file missing: $zonefile (install tzdata)"; return 1; }
+      # Minimal server/container images (e.g. ubuntu:22.04) ship without tzdata,
+      # so pull it in rather than giving up on the timezone entirely.
+      if [[ ! -f "$zonefile" ]]; then
+        log "zoneinfo file missing ($zonefile); installing tzdata…"
+        os="$(detect_os)" || return 1
+        install_pkg "$os" tzdata || { warn "failed to install tzdata"; return 1; }
+      fi
+      [[ -f "$zonefile" ]] || { warn "zoneinfo file still missing after installing tzdata: $zonefile"; return 1; }
       $sudo ln -sf "$zonefile" /etc/localtime
       # /etc/timezone is Debian's plaintext record; RHEL ignores it but writing it is harmless.
       echo "$tz" | $sudo tee /etc/timezone >/dev/null 2>&1 || true
@@ -244,7 +263,7 @@ step_tldr() {
 }
 
 install_tldr_via_pipx() {
-  local os; os="$(detect_os)"
+  local os; os="$(detect_os)" || return 1
   if ! command -v pipx >/dev/null 2>&1; then
     log "installing pipx (needed for tldr)…"
     # The package is named `pipx` on Debian, RHEL/EPEL and Homebrew alike.
@@ -276,7 +295,7 @@ install_go_from_upstream() {
   command -v tar  >/dev/null 2>&1 || die "tar is required to install go"
 
   local goos goarch version url tmp sudo
-  sudo="$(sudo_cmd)"
+  sudo="$(sudo_cmd)" || return 1
 
   case "$(uname -s)" in
     Linux)  goos=linux ;;
