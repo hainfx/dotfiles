@@ -428,8 +428,13 @@ link_bashrc() {
 link_shell_rc_paths() {
   local marker="# >>> dotfiles: PATH additions >>>"
   local endmarker="# <<< dotfiles: PATH additions <<<"
-  local block
-  block="$(cat <<'EOF'
+  # NOTE: emit the block with a heredoc *at the point of use* rather than
+  # capturing it via block="$(cat <<'EOF' ... EOF)". macOS ships bash 3.2, whose
+  # parser scans for the closing paren of a command substitution through the
+  # heredoc body — the ")" in `*"...:"*)` ends the substitution early and the
+  # remainder gets expanded as live shell text, corrupting the rc files.
+  _emit_path_block() {
+    cat <<'EOF'
 # go: upstream install lives in /usr/local/go; user tools land in $GOPATH/bin
 if [ -d /usr/local/go/bin ]; then
   case ":$PATH:" in *":/usr/local/go/bin:"*) ;; *) export PATH="$PATH:/usr/local/go/bin" ;; esac
@@ -442,7 +447,7 @@ if [ -d "$HOME/.local/bin" ]; then
   case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$PATH:$HOME/.local/bin" ;; esac
 fi
 EOF
-)"
+  }
 
   local rc
   # ~/.profile is a login-shell rc; both bash and sh read it, and it runs before
@@ -461,11 +466,13 @@ EOF
     fi
     {
       printf '\n%s\n' "$marker"
-      printf '%s\n' "$block"
+      _emit_path_block
       printf '%s\n' "$endmarker"
     } >> "$rc"
     log "✓ appended PATH block to $rc"
   done
+
+  unset -f _emit_path_block
 }
 
 # Idempotent: adds fzf key-bindings + fuzzy-completion init to per-shell rc files.
@@ -508,7 +515,7 @@ link_fzf_init() {
 step_tmux_plugins() {
   local tpm_dir="$HOME/.tmux/plugins/tpm"
   if [[ ! -d "$tpm_dir" ]]; then
-    log "cloning TPM into $tpm_dir…"
+    log "cloning TPM into ${tpm_dir}…"
     command -v git >/dev/null 2>&1 || die "git is required to install TPM"
     git clone --depth=1 https://github.com/tmux-plugins/tpm "$tpm_dir"
   else
