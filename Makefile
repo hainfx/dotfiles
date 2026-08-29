@@ -8,7 +8,7 @@ help:
 	@echo "make timezone      - set system timezone to Asia/Singapore"
 	@echo "make tools         - install missing required tools (vim tmux fzf curl)"
 	@echo "make optional      - install missing optional tools (git make docker python3) + upstream Go + tldr via pipx"
-	@echo "make link          - symlink .tmux.conf/.vimrc into \$$HOME and source bash/.workrc from ~/.bashrc"
+	@echo "make link          - symlink .tmux.conf/.vimrc into \$$HOME and source bash|zsh/.workrc from ~/.bashrc|~/.zshrc"
 	@echo "make tmux-plugins  - install TPM and tmux plugins"
 	@echo "make clean         - remove symlinks, TPM, and the bashrc source block"
 
@@ -43,11 +43,13 @@ clean:
 	@for rc in $$HOME/.profile $$HOME/.bashrc $$HOME/.zshrc $$HOME/.config/fish/config.fish; do \
 	  [ -f "$$rc" ] || continue; \
 	  removed=0; \
-	  if grep -Fq "# >>> dotfiles: source bash/.workrc >>>" "$$rc"; then \
-	    echo "removing workrc source block from $$rc"; \
-	    sed -i.bak '/# >>> dotfiles: source bash\/\.workrc >>>/,/# <<< dotfiles: source bash\/\.workrc <<</d' "$$rc"; \
-	    removed=1; \
-	  fi; \
+	  for sh in bash zsh; do \
+	    if grep -Fq "# >>> dotfiles: source $$sh/.workrc >>>" "$$rc"; then \
+	      echo "removing $$sh/.workrc source block from $$rc"; \
+	      sed -i.bak "/# >>> dotfiles: source $$sh\/\.workrc >>>/,/# <<< dotfiles: source $$sh\/\.workrc <<</d" "$$rc"; \
+	      removed=1; \
+	    fi; \
+	  done; \
 	  if grep -Fq "# >>> dotfiles: PATH additions >>>" "$$rc"; then \
 	    echo "removing PATH additions block from $$rc"; \
 	    sed -i.bak '/# >>> dotfiles: PATH additions >>>/,/# <<< dotfiles: PATH additions <<</d' "$$rc"; \

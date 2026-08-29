@@ -1,0 +1,8 @@
+#! /bin/zsh
+
+# zsh port of bash/.workrc: %n/%M/%~ replace \u/\H/\w, and %{...%} marks the
+# zero-width escapes that \[...\] marks in bash.
+export PROMPT=$'%{\e[1;33m%}%n@%{\e[1;32m%}%M%{\e[31m%}:%~%{\e[31m%}/%{\e[0;37m%}\n$ '
+export LS_COLORS="no=00:fi=00:di=01;33:ln=01;36:"
+
+alias f=fzf

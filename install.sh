@@ -6,7 +6,7 @@
 #   ./install.sh timezone     # set the system timezone only
 #   ./install.sh tools        # install missing required tools only
 #   ./install.sh optional     # install missing optional tools only
-#   ./install.sh link         # create symlinks and source bash/.workrc from ~/.bashrc
+#   ./install.sh link         # create symlinks and source the per-shell .workrc files
 #   ./install.sh tmux-plugins # install tmux plugins only
 
 set -euo pipefail
@@ -394,32 +394,41 @@ link_file() {
 step_link() {
   link_file "$DOTFILES_DIR/tmux/.tmux.conf" "$HOME/.tmux.conf"
   link_file "$DOTFILES_DIR/vim/.vimrc"      "$HOME/.vimrc"
-  link_bashrc
+  link_workrc bash "$HOME/.bashrc"
+  # zsh is macOS's default shell but often has no ~/.zshrc yet, so create one
+  # when zsh is actually installed rather than requiring the file up front.
+  if command -v zsh >/dev/null 2>&1 || [[ -f "$HOME/.zshrc" ]]; then
+    link_workrc zsh "$HOME/.zshrc"
+  else
+    log "✓ zsh not installed, skipping zsh/.workrc"
+  fi
   link_shell_rc_paths
   link_fzf_init
 }
 
-# Idempotent: appends a marker + source line to ~/.bashrc once. We don't copy
-# the file, so future edits to bash/.workrc take effect without re-running.
-link_bashrc() {
-  local bashrc="$HOME/.bashrc"
-  local src="$DOTFILES_DIR/bash/.workrc"
-  local marker="# >>> dotfiles: source bash/.workrc >>>"
-  local endmarker="# <<< dotfiles: source bash/.workrc <<<"
+# Idempotent: appends a marker + source line for <shell>/.workrc to that shell's
+# rc file once. We don't copy the file, so future edits to the .workrc take
+# effect without re-running.
+# $1 shell name (also the repo subdirectory), $2 target rc file under $HOME.
+link_workrc() {
+  local shell="$1" rc="$2"
+  local src="$DOTFILES_DIR/$shell/.workrc"
+  local marker="# >>> dotfiles: source $shell/.workrc >>>"
+  local endmarker="# <<< dotfiles: source $shell/.workrc <<<"
 
   [[ -f "$src" ]] || die "workrc source file not found: $src"
-  touch "$bashrc"
+  touch "$rc"
 
-  if grep -Fq "$marker" "$bashrc"; then
-    log "✓ $bashrc already sources $src"
+  if grep -Fq "$marker" "$rc"; then
+    log "✓ $rc already sources $src"
     return
   fi
   {
     printf '\n%s\n' "$marker"
     printf '[ -f %q ] && . %q\n' "$src" "$src"
     printf '%s\n' "$endmarker"
-  } >> "$bashrc"
-  log "✓ appended source line for $src to $bashrc"
+  } >> "$rc"
+  log "✓ appended source line for $src to $rc"
 }
 
 # Idempotent: adds Go and pipx PATH entries to ~/.profile, ~/.bashrc, and ~/.zshrc (if it exists).
