@@ -7,7 +7,7 @@ help:
 	@echo "make install       - full setup: timezone + required tools + optional tools + link + tmux plugins"
 	@echo "make timezone      - set system timezone to Asia/Singapore"
 	@echo "make tools         - install missing required tools (vim tmux fzf curl)"
-	@echo "make optional      - install missing optional tools (git make docker python3) + upstream Go + tldr via pipx"
+	@echo "make optional      - install missing optional tools (git make docker python3 unzip) + upstream Go/bun + nvm with node 24 (npm included) + tldr via pipx"
 	@echo "make link          - symlink .tmux.conf/.vimrc into \$$HOME and source bash|zsh/.workrc from ~/.bashrc|~/.zshrc"
 	@echo "make tmux-plugins  - install TPM and tmux plugins"
 	@echo "make clean         - remove symlinks, TPM, and the bashrc source block"
@@ -53,6 +53,11 @@ clean:
 	  if grep -Fq "# >>> dotfiles: PATH additions >>>" "$$rc"; then \
 	    echo "removing PATH additions block from $$rc"; \
 	    sed -i.bak '/# >>> dotfiles: PATH additions >>>/,/# <<< dotfiles: PATH additions <<</d' "$$rc"; \
+	    removed=1; \
+	  fi; \
+	  if grep -Fq "# >>> dotfiles: nvm init >>>" "$$rc"; then \
+	    echo "removing nvm init block from $$rc"; \
+	    sed -i.bak '/# >>> dotfiles: nvm init >>>/,/# <<< dotfiles: nvm init <<</d' "$$rc"; \
 	    removed=1; \
 	  fi; \
 	  if grep -Fq "# >>> dotfiles: fzf init >>>" "$$rc"; then \

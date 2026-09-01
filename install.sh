@@ -23,12 +23,26 @@ REQUIRED_TOOLS=(vim tmux fzf curl)
 # upstream tarball to /usr/local/go, not the distro-packaged version).
 # `tldr` is handled separately via pipx (uniform across Debian/RHEL, avoids
 # EPEL/tealdeer/legacy-`tldr` package hunting).
-OPTIONAL_TOOLS=(git make docker python3)
+# `node` (with its bundled `npm`) and `bun` are handled separately too: distro
+# packages lag many major versions behind, so node comes from nvm and bun from
+# its upstream release zip.
+# `npm` is not in this list either — see step_npm for why the ordering matters.
+# `unzip` is in this list because bun ships zip archives only.
+OPTIONAL_TOOLS=(git make docker python3 unzip)
 
 # ---------- Output helpers ----------
 log()  { printf '\033[1;34m[dotfiles]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[dotfiles]\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31m[dotfiles]\033[0m %s\n' "$*" >&2; exit 1; }
+
+# Download $1 to $2, showing curl's compact progress bar on stderr. The big
+# upstream downloads (go, bun, nvm) used to run under `-s` (silent), so a slow
+# link just looked hung for however long the transfer took; `--progress-bar`
+# replaces that with a live meter. Kept out of small metadata fetches (e.g. the
+# go.dev version query) where a bar would be noise for a sub-second request.
+curl_dl() {
+  curl -fL --progress-bar "$1" -o "$2"
+}
 
 # ---------- Platform detection ----------
 # Prints one of: debian | rhel | macos
@@ -85,9 +99,10 @@ tool_works() {
   local tool="$1"
   command -v "$tool" >/dev/null 2>&1 || return 1
   case "$tool" in
-    tmux) tmux -V    >/dev/null 2>&1 ;;  # tmux has no --version
-    go)   go version >/dev/null 2>&1 ;;  # go uses a subcommand, not a flag
-    *)    "$tool" --version >/dev/null 2>&1 ;;
+    tmux)  tmux -V    >/dev/null 2>&1 ;;  # tmux has no --version
+    go)    go version >/dev/null 2>&1 ;;  # go uses a subcommand, not a flag
+    unzip) unzip -v   >/dev/null 2>&1 ;;  # Info-ZIP rejects --version (exit 10)
+    *)     "$tool" --version >/dev/null 2>&1 ;;
   esac
 }
 
@@ -105,6 +120,7 @@ pkg_name_for() {
     debian:python3) echo python3 ;;    # Generic meta pulls current stable + adds /usr/bin/python3.
     rhel:python3)   rhel_python_pkg ;; # Newest available python3.X module/package.
     macos:python3)  echo python ;;     # Homebrew `python` is the current stable python3.
+    macos:npm)      echo node ;;       # Homebrew has no `npm` formula; npm ships inside `node`.
     *:*)            echo "$tool" ;;
   esac
 }
@@ -269,6 +285,10 @@ step_optional() {
   install_tool_list optional "${OPTIONAL_TOOLS[@]}"
   step_tldr
   step_go
+  step_nvm
+  step_node
+  step_npm
+  step_bun
 }
 
 # ---------- Step 2a: tldr via pipx ----------
@@ -354,7 +374,7 @@ install_go_from_upstream() {
   # No RETURN trap here: RETURN traps aren't function-local, so a trap armed on
   # an early-return path stays installed and re-fires on every later function
   # return. Clean up explicitly on each exit path instead.
-  if ! curl -fsSL "$url" -o "$tmp/go.tar.gz"; then
+  if ! curl_dl "$url" "$tmp/go.tar.gz"; then
     rm -rf "$tmp"
     warn "download failed: $url"
     return 1
@@ -368,6 +388,215 @@ install_go_from_upstream() {
   fi
   rm -rf "$tmp"
   log "✓ extracted to /usr/local/go — run 'make link' if $HOME/.bashrc doesn't yet have the go PATH block"
+}
+
+# ---------- Step 2c: nvm + Node.js ----------
+# Node comes from nvm, not from a distro package or a bare tarball, so switching
+# versions later is `nvm use` rather than a reinstall.
+# NVM_VERSION is pinned: the installer is fetched by tag, and an unpinned one
+# would change under us between runs.
+NVM_VERSION="v0.40.7"
+NVM_DIR_DEFAULT="$HOME/.nvm"
+# Node major series to install and make the default; nvm resolves "24" to the
+# newest 24.x at install time. npm ships with it, so there is nothing extra to do.
+NODE_VERSION="24"
+
+# Run a command with nvm loaded. nvm is a shell function, so it only exists in a
+# shell that has sourced nvm.sh — every nvm call in this script goes through here.
+# The subshell keeps that sourcing out of the installer's own shell, and relaxes
+# -u/-e first: nvm.sh reads unset variables and is not written for `set -euo pipefail`.
+with_nvm() {
+  local nvm_sh="${NVM_DIR:-$NVM_DIR_DEFAULT}/nvm.sh"
+  [[ -s "$nvm_sh" ]] || return 1
+  (
+    set +u +e
+    # shellcheck disable=SC1090
+    . "$nvm_sh" >/dev/null 2>&1 || exit 1
+    "$@"
+  )
+}
+
+step_nvm() {
+  local nvm_dir="${NVM_DIR:-$NVM_DIR_DEFAULT}"
+  if [[ -s "$nvm_dir/nvm.sh" ]]; then
+    log "✓ nvm already installed ($nvm_dir, $(with_nvm nvm --version 2>/dev/null))"
+    return
+  fi
+  install_nvm || warn "optional tool nvm failed to install, continuing"
+}
+
+install_nvm() {
+  command -v curl >/dev/null 2>&1 || { warn "curl is required to install nvm"; return 1; }
+  local nvm_dir="${NVM_DIR:-$NVM_DIR_DEFAULT}" tmp
+  tmp="$(mktemp -d)"
+  log "installing nvm $NVM_VERSION into ${nvm_dir}…"
+  # No RETURN trap (see install_go_from_upstream): clean up on each path instead.
+  if ! curl_dl "https://raw.githubusercontent.com/nvm-sh/nvm/$NVM_VERSION/install.sh" "$tmp/install.sh"; then
+    rm -rf "$tmp"
+    warn "failed to download the nvm $NVM_VERSION installer"
+    return 1
+  fi
+  # PROFILE=/dev/null is nvm's documented opt-out from rc-file editing: its own
+  # block carries no markers, so `make clean` could never remove it. We append an
+  # equivalent block in link_nvm_init instead.
+  # METHOD=script keeps this off git, which is only an optional tool here.
+  # stdout is left connected (not >/dev/null) so the installer's own download
+  # progress for nvm.sh is visible instead of the step looking stalled.
+  if ! env PROFILE=/dev/null METHOD=script NVM_DIR="$nvm_dir" bash "$tmp/install.sh"; then
+    rm -rf "$tmp"
+    warn "the nvm installer failed"
+    return 1
+  fi
+  rm -rf "$tmp"
+  [[ -s "$nvm_dir/nvm.sh" ]] || { warn "nvm.sh missing after install: $nvm_dir/nvm.sh"; return 1; }
+  log "✓ nvm $(with_nvm nvm --version 2>/dev/null) installed to $nvm_dir"
+}
+
+step_node() {
+  local nvm_dir="${NVM_DIR:-$NVM_DIR_DEFAULT}" have
+  if [[ ! -s "$nvm_dir/nvm.sh" ]]; then
+    warn "nvm is not installed; skipping node $NODE_VERSION"
+    return
+  fi
+  # `nvm version 24` prints the installed 24.x it resolves to, or "N/A".
+  have="$(with_nvm nvm version "$NODE_VERSION" 2>/dev/null || true)"
+  if [[ "$have" == v* ]]; then
+    log "✓ node $have already installed via nvm"
+  else
+    log "installing node $NODE_VERSION via nvm…"
+    if ! with_nvm nvm install "$NODE_VERSION"; then
+      warn "optional tool node failed to install via nvm, continuing"
+      return
+    fi
+    have="$(with_nvm nvm version "$NODE_VERSION" 2>/dev/null || true)"
+    log "✓ installed node $have via nvm"
+  fi
+  # The default alias is what a new shell picks up when nvm.sh loads.
+  if with_nvm nvm alias default "$NODE_VERSION" >/dev/null 2>&1; then
+    log "✓ nvm default alias -> $NODE_VERSION"
+  else
+    warn "failed to set the nvm default alias to $NODE_VERSION"
+  fi
+  log "  run 'make link' if $HOME/.bashrc doesn't yet have the nvm init block"
+}
+
+# npm version from nvm's default node. Only meaningful inside with_nvm, which is
+# where the nvm function and its PATH manipulation exist.
+nvm_default_npm_version() {
+  nvm use --silent default >/dev/null 2>&1 || return 1
+  npm --version 2>/dev/null
+}
+
+# ---------- Step 2d: npm ----------
+# npm normally arrives with the node that nvm installs, so this step is a
+# fallback for hosts where node came from elsewhere and npm did not follow (some
+# distros split npm into its own package).
+# Deliberately NOT in OPTIONAL_TOOLS: that list is installed before step_node,
+# and `apt-get install npm` pulls in the distro's old nodejs — which step_node
+# would then see as a working `node` and skip the nvm install for.
+step_npm() {
+  local existing nvm_npm
+  existing="$(command -v npm 2>/dev/null || true)"
+  # Ask nvm first, and before falling back to a package: the node nvm just
+  # installed is not on PATH yet (the nvm init block only reaches future
+  # shells), so a PATH-only check would call npm missing and add a redundant
+  # distro npm on top of the one that came bundled with node.
+  nvm_npm="$(with_nvm nvm_default_npm_version 2>/dev/null || true)"
+  if [[ -n "$nvm_npm" ]]; then
+    log "✓ npm $nvm_npm comes with the nvm-managed node (nvm default)"
+    return
+  fi
+  if tool_works npm; then
+    log "✓ npm already installed ($existing, $(npm --version 2>/dev/null))"
+    return
+  fi
+  if [[ -n "$existing" ]]; then
+    warn "npm is on PATH ($existing) but fails to run; reinstalling"
+  fi
+  local os; os="$(detect_os)" || return 1
+  local pkg; pkg="$(pkg_name_for "$os" npm)"
+  log "installing npm (package: $pkg)…"
+  install_pkg "$os" "$pkg" || warn "optional tool npm failed to install, continuing"
+}
+
+# ---------- Step 2e: upstream bun ----------
+# bun has no distro packages at all. Its releases live on GitHub as zips, and
+# the /releases/latest/download/ URL always redirects to the newest asset, so no
+# API call (and no rate limit) is involved. Installs user-scoped into ~/.bun,
+# the same layout bun's own installer and `bun upgrade` expect.
+step_bun() {
+  local existing
+  existing="$(command -v bun 2>/dev/null || true)"
+  if tool_works bun; then
+    log "✓ bun already installed ($existing, $(bun --version 2>/dev/null))"
+    return
+  fi
+  if [[ -n "$existing" ]]; then
+    warn "bun is on PATH ($existing) but fails to run; reinstalling from upstream"
+  fi
+  install_bun_from_upstream || warn "optional tool bun failed to install, continuing"
+}
+
+install_bun_from_upstream() {
+  command -v curl >/dev/null 2>&1 || { warn "curl is required to install bun"; return 1; }
+  # bun ships zip archives only; unzip is in OPTIONAL_TOOLS and normally already
+  # installed by the time this runs, but that install is allowed to fail.
+  tool_works unzip || { warn "unzip is required to install bun; skipping"; return 1; }
+
+  local asset url tmp bun_dir
+  case "$(uname -s)-$(uname -m)" in
+    Linux-x86_64|Linux-amd64)   asset="bun-linux-x64$(bun_baseline_suffix)" ;;
+    Linux-aarch64|Linux-arm64)  asset="bun-linux-aarch64" ;;
+    Darwin-x86_64)              asset="bun-darwin-x64$(bun_baseline_suffix)" ;;
+    Darwin-arm64)               asset="bun-darwin-aarch64" ;;
+    *) warn "bun upstream install: unsupported platform $(uname -s)-$(uname -m)"; return 1 ;;
+  esac
+  url="https://github.com/oven-sh/bun/releases/latest/download/${asset}.zip"
+
+  log "installing bun ($asset) from $url"
+  tmp="$(mktemp -d)"
+  # No RETURN trap (see install_go_from_upstream): clean up on each path instead.
+  if ! curl_dl "$url" "$tmp/bun.zip"; then
+    rm -rf "$tmp"
+    warn "download failed: $url"
+    return 1
+  fi
+  if ! unzip -q -o "$tmp/bun.zip" -d "$tmp"; then
+    rm -rf "$tmp"
+    warn "failed to unzip $asset"
+    return 1
+  fi
+  # The zip holds a single <asset>/bun entry.
+  bun_dir="$tmp/$asset"
+  if [[ ! -f "$bun_dir/bun" ]]; then
+    rm -rf "$tmp"
+    warn "unexpected archive layout: $bun_dir/bun not found"
+    return 1
+  fi
+
+  # ~/.bun, not /usr/local: no root needed, and it is where `bun upgrade` writes.
+  if ! { mkdir -p "$HOME/.bun/bin" && install -m 755 "$bun_dir/bun" "$HOME/.bun/bin/bun"; }; then
+    rm -rf "$tmp"
+    warn "failed to install bun into $HOME/.bun/bin"
+    return 1
+  fi
+  rm -rf "$tmp"
+  log "✓ installed bun $("$HOME/.bun/bin/bun" --version 2>/dev/null) to $HOME/.bun/bin"
+  log "  run 'make link' if $HOME/.bashrc doesn't yet have the bun PATH block"
+}
+
+# bun's default x64 builds require AVX2; CPUs without it SIGILL on first run, so
+# fall back to the -baseline asset there. Prints the suffix, empty when AVX2 is present.
+bun_baseline_suffix() {
+  case "$(uname -s)" in
+    Linux)
+      grep -qw avx2 /proc/cpuinfo 2>/dev/null && { echo ""; return; }
+      ;;
+    Darwin)
+      sysctl -n machdep.cpu.leaf7_features 2>/dev/null | grep -qi AVX2 && { echo ""; return; }
+      ;;
+  esac
+  echo "-baseline"
 }
 
 # ---------- Step 3: symlinks ----------
@@ -403,6 +632,7 @@ step_link() {
     log "✓ zsh not installed, skipping zsh/.workrc"
   fi
   link_shell_rc_paths
+  link_nvm_init
   link_fzf_init
 }
 
@@ -431,7 +661,7 @@ link_workrc() {
   log "✓ appended source line for $src to $rc"
 }
 
-# Idempotent: adds Go and pipx PATH entries to ~/.profile, ~/.bashrc, and ~/.zshrc (if it exists).
+# Idempotent: adds Go, bun and pipx PATH entries to ~/.profile, ~/.bashrc, and ~/.zshrc (if it exists).
 # Writing to ~/.profile lets login/non-interactive shells (cron, ssh CMD, IDE tasks) pick up
 # PATH too — Ubuntu's default bashrc bails early for non-interactive shells.
 link_shell_rc_paths() {
@@ -450,6 +680,10 @@ if [ -d /usr/local/go/bin ]; then
 fi
 if [ -d "$HOME/go/bin" ]; then
   case ":$PATH:" in *":$HOME/go/bin:"*) ;; *) export PATH="$PATH:$HOME/go/bin" ;; esac
+fi
+# bun: user-scoped install, the layout `bun upgrade` expects
+if [ -d "$HOME/.bun/bin" ]; then
+  case ":$PATH:" in *":$HOME/.bun/bin:"*) ;; *) export PATH="$PATH:$HOME/.bun/bin" ;; esac
 fi
 # pipx: user-scoped Python CLIs (tldr, etc.) live in ~/.local/bin
 if [ -d "$HOME/.local/bin" ]; then
@@ -482,6 +716,50 @@ EOF
   done
 
   unset -f _emit_path_block
+}
+
+# Idempotent: adds nvm's loader to ~/.bashrc and ~/.zshrc.
+# nvm is a shell function, not a binary, so it has to be sourced per shell —
+# there is no PATH entry that would do instead, which is why this is its own
+# block rather than a few lines in link_shell_rc_paths.
+# Not written to ~/.profile: nvm.sh needs bash/zsh/ksh and is not POSIX-sh safe,
+# so cron and `ssh host cmd` do not get node this way.
+# nvm's own installer would append an unmarked copy of this block; install_nvm
+# passes PROFILE=/dev/null to suppress it so `make clean` stays able to undo it.
+link_nvm_init() {
+  local marker="# >>> dotfiles: nvm init >>>"
+  local endmarker="# <<< dotfiles: nvm init <<<"
+  local nvm_dir="${NVM_DIR:-$NVM_DIR_DEFAULT}"
+  local rc
+
+  for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
+    case "$rc" in
+      "$HOME/.zshrc") [[ -f "$rc" ]] || continue ;;
+      *)              touch "$rc" ;;
+    esac
+
+    if grep -Fq "$marker" "$rc"; then
+      log "✓ $rc already contains nvm init block"
+      continue
+    fi
+    {
+      printf '\n%s\n' "$marker"
+      # Emit the literal `$HOME/.nvm` (not its expansion) so the line survives a
+      # $HOME move; only a custom $NVM_DIR is written out as a fixed path.
+      if [[ "$nvm_dir" == "$HOME/.nvm" ]]; then
+        printf 'export NVM_DIR="$HOME/.nvm"\n'
+      else
+        printf 'export NVM_DIR=%q\n' "$nvm_dir"
+      fi
+      printf '[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"  # load nvm\n'
+      # nvm's bash_completion uses `complete`, which zsh lacks without bashcompinit.
+      if [[ "$rc" == "$HOME/.bashrc" ]]; then
+        printf '[ -s "$NVM_DIR/bash_completion" ] && . "$NVM_DIR/bash_completion"  # nvm completion\n'
+      fi
+      printf '%s\n' "$endmarker"
+    } >> "$rc"
+    log "✓ appended nvm init block to $rc"
+  done
 }
 
 # Idempotent: adds fzf key-bindings + fuzzy-completion init to per-shell rc files.
@@ -526,7 +804,10 @@ step_tmux_plugins() {
   if [[ ! -d "$tpm_dir" ]]; then
     log "cloning TPM into ${tpm_dir}…"
     command -v git >/dev/null 2>&1 || die "git is required to install TPM"
-    git clone --depth=1 https://github.com/tmux-plugins/tpm "$tpm_dir"
+    # --progress: git only shows its transfer meter when stderr is a tty by
+    # default, so force it — this script's own log lines already go to a
+    # terminal, and a silent multi-second clone reads as a hang otherwise.
+    git clone --progress --depth=1 https://github.com/tmux-plugins/tpm "$tpm_dir"
   else
     log "✓ TPM already present at $tpm_dir"
   fi
