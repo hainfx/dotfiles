@@ -6,3 +6,13 @@ export PROMPT=$'%{\e[1;33m%}%n@%{\e[1;32m%}%M%{\e[31m%}:%~%{\e[31m%}/%{\e[0;37m%
 export LS_COLORS="no=00:fi=00:di=01;33:ln=01;36:"
 
 alias f=fzf
+
+# Disable xterm modifyOtherKeys reporting from the outer terminal (Ctrl+B / Ctrl+F
+# etc. otherwise get encoded as CSI 27;5;NN~ and leak into the shell line buffer).
+# Inside tmux, wrap the sequence in DCS passthrough (\ePtmux;...\e\\) so tmux
+# forwards it to the outer terminal instead of swallowing it.
+if [ -n "$TMUX" ]; then
+  printf '\ePtmux;\e\e[>4;0m\e\\' 2>/dev/null
+else
+  printf '\e[>4;0m' 2>/dev/null
+fi
