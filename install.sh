@@ -2,11 +2,12 @@
 # dotfiles installer
 # Supports Debian/Ubuntu, CentOS/RHEL/Fedora, and macOS.
 # Usage:
-#   ./install.sh              # full flow: timezone + tools + optional + link + tmux plugins
+#   ./install.sh              # full flow: timezone + tools + optional + link + vim/tmux plugins
 #   ./install.sh timezone     # set the system timezone only
 #   ./install.sh tools        # install missing required tools only
 #   ./install.sh optional     # install missing optional tools only
 #   ./install.sh link         # create symlinks and source the per-shell .workrc files
+#   ./install.sh vim-plugins  # install vim-plug and the plugins declared in vim/.vimrc
 #   ./install.sh tmux-plugins # install tmux plugins only
 
 set -euo pipefail
@@ -798,7 +799,40 @@ link_fzf_init() {
   unset -f _append_fzf_block
 }
 
-# ---------- Step 4: tmux plugins ----------
+# ---------- Step 4: vim plugins ----------
+# vim-plug is a single autoload script at ~/.vim/autoload/plug.vim. Once it is
+# in place, `vim +PlugInstall +qall` fetches every `Plug '...'` declared in
+# vim/.vimrc — idempotent: PlugInstall skips plugins that already exist.
+step_vim_plugins() {
+  command -v vim >/dev/null 2>&1 || { warn "vim is not installed; skipping vim plugins"; return; }
+  command -v git >/dev/null 2>&1 || { warn "git is required to install vim plugins; skipping"; return; }
+
+  local plug_vim="$HOME/.vim/autoload/plug.vim"
+  if [[ -f "$plug_vim" ]]; then
+    log "✓ vim-plug already present at $plug_vim"
+  else
+    command -v curl >/dev/null 2>&1 || { warn "curl is required to install vim-plug; skipping"; return; }
+    log "installing vim-plug into $plug_vim…"
+    mkdir -p "$(dirname "$plug_vim")"
+    if ! curl_dl "https://raw.githubusercontent.com/junegunn/vim-plug/master/plug.vim" "$plug_vim"; then
+      warn "failed to download vim-plug"
+      return
+    fi
+    log "✓ installed vim-plug"
+  fi
+
+  # +PlugInstall clones any missing plugins; --sync makes vim wait for the jobs
+  # to finish instead of backgrounding them. +qall exits when it is done.
+  # </dev/null keeps vim from complaining about a non-tty stdin under redirects.
+  log "installing vim plugins via :PlugInstall…"
+  if vim -Es -u "$HOME/.vimrc" +'silent! PlugInstall --sync' +qall </dev/null; then
+    log "✓ vim plugins installed"
+  else
+    warn "vim +PlugInstall exited non-zero, continuing"
+  fi
+}
+
+# ---------- Step 5: tmux plugins ----------
 step_tmux_plugins() {
   local tpm_dir="$HOME/.tmux/plugins/tpm"
   if [[ ! -d "$tpm_dir" ]]; then
@@ -831,14 +865,15 @@ step_tmux_plugins() {
 main() {
   local cmd="${1:-all}"
   case "$cmd" in
-    all)          step_timezone; step_tools; step_optional; step_link; step_tmux_plugins ;;
+    all)          step_timezone; step_tools; step_optional; step_link; step_vim_plugins; step_tmux_plugins ;;
     timezone)     step_timezone ;;
     tools)        step_tools ;;
     optional)     step_optional ;;
     link)         step_link ;;
+    vim-plugins)  step_vim_plugins ;;
     tmux-plugins) step_tmux_plugins ;;
     -h|--help|help)
-      sed -n '2,11p' "$0"
+      sed -n '2,12p' "$0"
       ;;
     *) die "unknown command: $cmd (see --help)" ;;
   esac

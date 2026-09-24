@@ -125,6 +125,20 @@ set splitright
 " --------------
 " copy and paste
 " --------------
+" Pasting over a visual selection normally deletes the selection INTO the
+" unnamed register first, clobbering what you yanked -- so a second paste puts
+" the just-deleted text instead of your original yank. Vim >= 8.2.0693 fixes
+" this with visual P, but this build is older. So we save the unnamed register,
+" do a normal paste over the selection, then put the saved text back -- letting
+" you paste one yank over many selections in a row. (A short alternative is
+" `xnoremap p "_dP`, but that jams spacing on charwise end-of-line pastes.)
+function! s:VisualPasteKeepReg()
+  let l:save = [getreg('"'), getregtype('"')]
+  normal! gvp
+  call setreg('"', l:save[0], l:save[1])
+endfunction
+xnoremap <silent> p :<C-u>call <SID>VisualPasteKeepReg()<CR>
+
 " This Vim is built with -clipboard/-X11 (check :version) and we run over SSH
 " inside tmux, so the * / + registers connect to nothing and `set clipboard`
 " is a no-op. Instead we push yanks to the LOCAL machine's clipboard with an
@@ -260,18 +274,15 @@ set timeoutlen=500
 " --------------
 " plugin
 " --------------
-" call plug#begin()
-" 	Plug 'preservim/NERDTree'
-" 	Plug 'vim-airline/vim-airline'
-" 	Plug 'ctrlpvim/ctrlp.vim'
-" 	Plug 'tpope/vim-surround'
-" 	Plug 'tpope/vim-repeat'
-" 	Plug 'tomtom/tcomment_vim'
-" 	Plug 'mileszs/ack.vim'
-" 	Plug 'jiangmiao/auto-pairs'
-" 	Plug 'vim-scripts/ReplaceWithRegister'
-" 	Plug 'ojroques/vim-oscyank'
-" call plug#end()
+call plug#begin()
+	Plug 'tpope/vim-surround'
+	Plug 'tpope/vim-repeat'
+	Plug 'jiangmiao/auto-pairs'
+  Plug 'wellle/targets.vim'
+  Plug 'inkarkat/vim-ReplaceWithRegister'
+  Plug 'junegunn/fzf', { 'do': { -> fzf#install() } }
+  Plug 'junegunn/fzf.vim'
+call plug#end()
 
 
 " --------------

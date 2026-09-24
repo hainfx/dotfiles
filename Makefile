@@ -1,16 +1,17 @@
 SHELL := /bin/bash
 
-.PHONY: all install timezone tools optional link tmux-plugins clean help
+.PHONY: all install timezone tools optional link vim-plugins tmux-plugins clean help
 
 help:
 	@echo "make all           - alias for 'make install'"
-	@echo "make install       - full setup: timezone + required tools + optional tools + link + tmux plugins"
+	@echo "make install       - full setup: timezone + required tools + optional tools + link + vim/tmux plugins"
 	@echo "make timezone      - set system timezone to Asia/Singapore"
 	@echo "make tools         - install missing required tools (vim tmux fzf curl)"
 	@echo "make optional      - install missing optional tools (git make docker python3 unzip) + upstream Go/bun + nvm with node 24 (npm included) + tldr via pipx"
 	@echo "make link          - symlink .tmux.conf/.vimrc into \$$HOME and source bash|zsh/.workrc from ~/.bashrc|~/.zshrc"
+	@echo "make vim-plugins   - install vim-plug and the plugins declared in vim/.vimrc"
 	@echo "make tmux-plugins  - install TPM and tmux plugins"
-	@echo "make clean         - remove symlinks, TPM, and the bashrc source block"
+	@echo "make clean         - remove symlinks, TPM, vim-plug, and the bashrc source block"
 
 all: install
 
@@ -29,6 +30,9 @@ optional:
 link:
 	@./install.sh link
 
+vim-plugins:
+	@./install.sh vim-plugins
+
 tmux-plugins:
 	@./install.sh tmux-plugins
 
@@ -39,6 +43,14 @@ clean:
 	@if [ -d "$$HOME/.tmux/plugins/tpm" ]; then \
 	  echo "removing $$HOME/.tmux/plugins"; \
 	  rm -rf "$$HOME/.tmux/plugins"; \
+	fi
+	@if [ -f "$$HOME/.vim/autoload/plug.vim" ]; then \
+	  echo "removing $$HOME/.vim/autoload/plug.vim"; \
+	  rm -f "$$HOME/.vim/autoload/plug.vim"; \
+	fi
+	@if [ -d "$$HOME/.vim/plugged" ]; then \
+	  echo "removing $$HOME/.vim/plugged"; \
+	  rm -rf "$$HOME/.vim/plugged"; \
 	fi
 	@for rc in $$HOME/.profile $$HOME/.bashrc $$HOME/.zshrc $$HOME/.config/fish/config.fish; do \
 	  [ -f "$$rc" ] || continue; \
