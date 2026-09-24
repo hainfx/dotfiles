@@ -125,8 +125,37 @@ set splitright
 " --------------
 " copy and paste
 " --------------
-" Yank/paste through the system clipboard (* register)
-set clipboard=unnamed
+" This Vim is built with -clipboard/-X11 (check :version) and we run over SSH
+" inside tmux, so the * / + registers connect to nothing and `set clipboard`
+" is a no-op. Instead we push yanks to the LOCAL machine's clipboard with an
+" OSC 52 escape sequence: Vim -> tmux -> ssh -> local terminal -> OS clipboard.
+" Requires: tmux `set-clipboard on` (it is) and a terminal that honors OSC 52
+" (iTerm2, WezTerm, kitty, Alacritty, Windows Terminal, recent macOS Terminal).
+
+" Send a string to the system clipboard via OSC 52 (base64-encoded payload).
+function! s:Osc52Copy(text) abort
+  let l:b64 = substitute(system('base64 | tr -d "\n"', a:text), '\n', '', 'g')
+  let l:seq = "\033]52;c;" . l:b64 . "\007"
+  " Inside tmux, wrap the sequence in a DCS passthrough so tmux forwards it.
+  if !empty($TMUX)
+    let l:seq = "\033Ptmux;\033" . l:seq . "\033\\"
+  endif
+  " Write straight to the controlling terminal so it works even when Vim's
+  " stdout is redirected; fall back to writing to the terminal otherwise.
+  silent! call writefile([l:seq], '/dev/tty', 'b')
+endfunction
+
+" Auto-mirror real yanks (y / yy / Y) to the local clipboard. Deletes and
+" changes are excluded so the clipboard isn't clobbered by editing.
+if exists('##TextYankPost')
+  augroup osc52_yank
+    autocmd!
+    autocmd TextYankPost *
+          \ if v:event.operator ==# 'y' && v:event.regname ==# '' |
+          \   call s:Osc52Copy(join(v:event.regcontents, "\n")) |
+          \ endif
+  augroup END
+endif
 
 
 " --------------
