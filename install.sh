@@ -1321,7 +1321,7 @@ step_vim_plugins() {
     log "✓ vim-plug already present at $plug_vim"
   else
     command -v curl >/dev/null 2>&1 || { warn "curl is required to install vim-plug; skipping"; return; }
-    log "installing vim-plug into $plug_vim…"
+    log "installing vim-plug into ${plug_vim}…"
     mkdir -p "$(dirname "$plug_vim")"
     if ! curl_dl "https://raw.githubusercontent.com/junegunn/vim-plug/master/plug.vim" "$plug_vim"; then
       warn "failed to download vim-plug"
@@ -1331,10 +1331,17 @@ step_vim_plugins() {
   fi
 
   # +PlugInstall clones any missing plugins; --sync makes vim wait for the jobs
-  # to finish instead of backgrounding them. +qall exits when it is done.
-  # </dev/null keeps vim from complaining about a non-tty stdin under redirects.
+  # to finish instead of backgrounding them. +qall! exits without a "hit-enter"
+  # prompt: vim-plug prints a summary line to the message area, and even under
+  # `silent!` a plain +qall stops on the resulting |hit-enter-prompt| waiting
+  # for input on the controlling tty. Redirecting stdin/stdout to /dev/null on
+  # its own is not enough because vim writes prompts to /dev/tty directly. The
+  # `!` on qall force-quits past the prompt.
   log "installing vim plugins via :PlugInstall…"
-  if vim -Es -u "$HOME/.vimrc" +'silent! PlugInstall --sync' +qall </dev/null; then
+  if vim -Es -u "$HOME/.vimrc" \
+         +'set nomore' \
+         +'silent! PlugInstall --sync' \
+         +'qall!' </dev/null >/dev/null 2>&1; then
     log "✓ vim plugins installed"
   else
     warn "vim +PlugInstall exited non-zero, continuing"
