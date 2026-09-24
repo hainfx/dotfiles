@@ -6,7 +6,7 @@ help:
 	@echo "make all           - alias for 'make install'"
 	@echo "make install       - full setup: timezone + required tools + optional tools + link + vim/tmux plugins"
 	@echo "make timezone      - set system timezone to Asia/Singapore"
-	@echo "make tools         - install missing required tools (vim tmux fzf curl)"
+	@echo "make tools         - install missing required tools (vim curl) plus upstream fzf/rg/bat/delta + source-built tmux into ~/.local"
 	@echo "make optional      - install missing optional tools (git make docker python3 unzip) + upstream Go/bun + nvm with node 24 (npm included) + tldr via pipx"
 	@echo "make link          - symlink .tmux.conf/.vimrc into \$$HOME and source bash|zsh/.workrc from ~/.bashrc|~/.zshrc"
 	@echo "make vim-plugins   - install vim-plug and the plugins declared in vim/.vimrc"

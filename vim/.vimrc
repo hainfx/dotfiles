@@ -286,5 +286,58 @@ call plug#end()
 
 
 " --------------
+" fzf.vim
+" --------------
+" Centered floating popup, 90% x 70% of the screen
+let g:fzf_layout = { 'window': { 'width': 0.9, 'height': 0.7, 'border': 'rounded' } }
+" Preview pane on the right, 50% wide; toggle it with Ctrl-/
+let g:fzf_preview_window = ['right,50%', 'ctrl-/']
+" Open the picked file in a tab / split / vsplit
+let g:fzf_action = {
+  \ 'ctrl-t': 'tab split',
+  \ 'ctrl-x': 'split',
+  \ 'ctrl-v': 'vsplit' }
+" Skip the filename column in :Rg so fzf only fuzzy-matches the match text
+" (paths still appear in the results, they just aren't part of the query).
+command! -bang -nargs=* Rg
+  \ call fzf#vim#grep(
+  \   'rg --column --line-number --no-heading --color=always --smart-case -- '.shellescape(<q-args>),
+  \   1, fzf#vim#with_preview({'options': '--delimiter : --nth 4..'}), <bang>0)
+
+" <leader>f : fuzzy-find files under CWD (respects .gitignore if inside a repo)
+nnoremap <leader>f :Files<CR>
+" <leader>F : same, but seed the query with the word under the cursor
+nnoremap <leader>F :Files <C-r><C-w><CR>
+" <leader>b : pick from open buffers
+nnoremap <leader>b :Buffers<CR>
+" <leader>r : ripgrep across the project (needs rg installed)
+nnoremap <leader>r :Rg<CR>
+" <leader>R : ripgrep, seeded with the word under the cursor
+nnoremap <leader>R :Rg <C-r><C-w><CR>
+" <leader>l : fuzzy-search lines in the current buffer
+nnoremap <leader>l :BLines<CR>
+" <leader>L : fuzzy-search lines across all loaded buffers
+nnoremap <leader>L :Lines<CR>
+" <leader>h : recently opened files (MRU)
+nnoremap <leader>h :History<CR>
+" <leader>/ : recent search patterns
+nnoremap <leader>/ :History/<CR>
+" <leader>; : recent Ex commands
+nnoremap <leader>; :History:<CR>
+" <leader>gc : git commits reachable from HEAD
+nnoremap <leader>gc :Commits<CR>
+" <leader>gf : git-tracked files
+nnoremap <leader>gf :GFiles<CR>
+" <leader>gs : git status (staged / unstaged files)
+nnoremap <leader>gs :GFiles?<CR>
+" <leader>m  : marks
+nnoremap <leader>m :Marks<CR>
+" <leader>t  : ctags in the current buffer (requires ctags)
+nnoremap <leader>t :BTags<CR>
+" <leader>T  : ctags across the project
+nnoremap <leader>T :Tags<CR>
+
+
+" --------------
 " end
 " --------------

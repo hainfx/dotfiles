@@ -4,7 +4,7 @@
 # Usage:
 #   ./install.sh              # full flow: timezone + tools + optional + link + vim/tmux plugins
 #   ./install.sh timezone     # set the system timezone only
-#   ./install.sh tools        # install missing required tools only
+#   ./install.sh tools        # install missing required tools (vim/curl + upstream fzf/rg/bat/delta/tmux)
 #   ./install.sh optional     # install missing optional tools only
 #   ./install.sh link         # create symlinks and source the per-shell .workrc files
 #   ./install.sh vim-plugins  # install vim-plug and the plugins declared in vim/.vimrc
@@ -16,8 +16,20 @@ set -euo pipefail
 DOTFILES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Required tools: install unconditionally when missing.
-# `curl` is used by the upstream Go installer, so it must be in this set.
-REQUIRED_TOOLS=(vim tmux fzf curl)
+# `curl` is used by the upstream installers, so it must be in this set.
+# `tmux` is NOT here on purpose -- step_tmux_upstream builds the current
+# release (tmux/tmux) from source into ~/.local on Linux (distro tmux trails
+# upstream by a full minor version on server distros: Ubuntu 22.04 ships 3.2,
+# upstream is on 3.7), and uses Homebrew on macOS.
+# `vim` is NOT here either -- step_vim_upstream builds the current release
+# (vim/vim) from source into ~/.local on Linux (distro vim trails upstream by
+# many hundreds of patches: Ubuntu 22.04 ships 8.2, upstream is on 9.1.x with
+# 1000+ applied patches), and uses Homebrew on macOS. Community AppImages
+# exist but bake in a glibc floor and are Linux-x86_64-only.
+# `fzf` is NOT here either -- step_fzf installs the current upstream release
+# (junegunn/fzf) into ~/.local/bin, since the distro package trails upstream by
+# many minor versions on server distros (Ubuntu 22.04: 0.29 vs. 0.7x).
+REQUIRED_TOOLS=(curl)
 
 # Optional tools: install when missing, but a failure is not fatal.
 # `go` is handled separately via install_go_from_upstream (installs the official
@@ -43,6 +55,109 @@ die()  { printf '\033[1;31m[dotfiles]\033[0m %s\n' "$*" >&2; exit 1; }
 # go.dev version query) where a bar would be noise for a sub-second request.
 curl_dl() {
   curl -fL --progress-bar "$1" -o "$2"
+}
+
+# Resolve the latest release tag for OWNER/REPO by following the redirect at
+# https://github.com/OWNER/REPO/releases/latest to /releases/tag/<TAG>. Uses
+# the redirect (not the /api/repos/.../releases/latest API) to sidestep the
+# 60/hour unauthenticated rate limit and avoid a jq dependency. Emits the
+# raw tag on stdout (e.g. "v14.1.100", "0.66.1"); returns non-zero if the
+# final URL doesn't match /releases/tag/<TAG>.
+github_latest_tag() {
+  local owner="$1" repo="$2" final tag
+  final="$(curl -fsSLI -o /dev/null -w '%{url_effective}' \
+             "https://github.com/${owner}/${repo}/releases/latest" 2>/dev/null)" || return 1
+  # Final URL looks like https://github.com/OWNER/REPO/releases/tag/<TAG>.
+  tag="${final##*/releases/tag/}"
+  [[ -n "$tag" && "$tag" != "$final" ]] || return 1
+  printf '%s\n' "$tag"
+}
+
+# Return 0 when the tool's currently-installed version matches the upstream tag,
+# 1 otherwise. Used by the step_* functions so a fzf 0.29 sitting at
+# /usr/bin/fzf doesn't get treated as "already installed" -- we want the
+# upstream install to run whenever it would give a newer version.
+#   $1 installed version string (as printed by `<tool> --version` etc.)
+#   $2 upstream tag (as returned by github_latest_tag)
+# Normalizes by pulling the first "N.N.N" style token out of the version
+# string (so `fzf --version` output "0.29.0 (a140afeb)" reduces to "0.29.0",
+# and `tmux -V` output "tmux 3.6" to "3.6") and stripping any leading "v" on
+# the upstream tag. Non-strict: any mismatch means "reinstall".
+up_to_date_with_tag() {
+  local installed_raw="$1" tag="$2" installed norm_tag
+  # First numeric-dot-numeric run in the installed string.
+  installed="$(printf '%s\n' "$installed_raw" | grep -oE '[0-9]+(\.[0-9]+)+[a-z]?' | head -1)"
+  norm_tag="${tag#v}"
+  [[ -n "$installed" && "$installed" == "$norm_tag" ]]
+}
+
+# Decide whether a currently-installed upstream tool is current enough to skip.
+# Returns 0 ("skip: already at latest, or could not check upstream") or 1
+# ("outdated: caller should reinstall from upstream"). Logs its own reasoning
+# so each step_* stays two lines.
+#   $1 tool name (log label + `command -v` target)
+#   $2 GitHub owner
+#   $3 GitHub repo
+#   $4 installed version string (raw, as printed by the tool)
+# On upstream lookup failure this returns 0 (skip), NOT 1: a transient GitHub
+# outage shouldn't force a reinstall of a working local tool.
+check_upstream_current() {
+  local name="$1" owner="$2" repo="$3" installed_raw="$4" existing tag
+  existing="$(command -v "$name" 2>/dev/null || true)"
+  tag="$(github_latest_tag "$owner" "$repo" 2>/dev/null || true)"
+  if [[ -z "$tag" ]]; then
+    log "✓ $name already installed ($existing, $installed_raw); upstream check failed, skipping"
+    return 0
+  fi
+  if up_to_date_with_tag "$installed_raw" "$tag"; then
+    log "✓ $name $installed_raw already at latest ($tag) at $existing"
+    return 0
+  fi
+  log "$name at $existing is $installed_raw; latest upstream is $tag -- reinstalling"
+  return 1
+}
+
+# Download an upstream release archive, extract it, and install a single binary
+# from it into $HOME/.local/bin.
+#   $1 tool name (used for the destination filename and log lines)
+#   $2 URL of the archive
+#   $3 archive type: tar.gz | tar.xz | zip
+#   $4 relative path of the binary inside the extracted tree (e.g. "rg-.../rg")
+# Cleans up its tempdir on every exit path -- no RETURN trap (see
+# install_go_from_upstream for why).
+install_release_binary() {
+  local name="$1" url="$2" kind="$3" inner="$4" tmp bin
+  tmp="$(mktemp -d)"
+
+  log "installing $name from $url"
+  if ! curl_dl "$url" "$tmp/archive"; then
+    rm -rf "$tmp"
+    warn "download failed: $url"
+    return 1
+  fi
+
+  case "$kind" in
+    tar.gz) tar -xzf "$tmp/archive" -C "$tmp" ;;
+    tar.xz) tar -xJf "$tmp/archive" -C "$tmp" ;;
+    zip)    unzip -q -o "$tmp/archive" -d "$tmp" ;;
+    *)      rm -rf "$tmp"; warn "install_release_binary: unknown archive type '$kind'"; return 1 ;;
+  esac || { rm -rf "$tmp"; warn "failed to extract $name archive"; return 1; }
+
+  bin="$tmp/$inner"
+  if [[ ! -f "$bin" ]]; then
+    rm -rf "$tmp"
+    warn "unexpected archive layout: $bin not found"
+    return 1
+  fi
+
+  # $HOME/.local/bin is on PATH via the block written by link_shell_rc_paths.
+  if ! { mkdir -p "$HOME/.local/bin" && install -m 755 "$bin" "$HOME/.local/bin/$name"; }; then
+    rm -rf "$tmp"
+    warn "failed to install $name into $HOME/.local/bin"
+    return 1
+  fi
+  rm -rf "$tmp"
+  log "✓ installed $name to $HOME/.local/bin/$name"
 }
 
 # ---------- Platform detection ----------
@@ -122,6 +237,8 @@ pkg_name_for() {
     rhel:python3)   rhel_python_pkg ;; # Newest available python3.X module/package.
     macos:python3)  echo python ;;     # Homebrew `python` is the current stable python3.
     macos:npm)      echo node ;;       # Homebrew has no `npm` formula; npm ships inside `node`.
+    macos:rg)       echo ripgrep ;;    # Homebrew formula is `ripgrep`; binary is `rg`.
+    macos:delta)    echo git-delta ;;  # Homebrew formula is `git-delta`; binary is `delta`.
     *:*)            echo "$tool" ;;
   esac
 }
@@ -279,7 +396,396 @@ set_system_timezone() {
 }
 
 # ---------- Step 1: required tools ----------
-step_tools()    { install_tool_list required "${REQUIRED_TOOLS[@]}"; }
+step_tools() {
+  install_tool_list required "${REQUIRED_TOOLS[@]}"
+  # Upstream releases for tools whose distro packages lag many minor versions
+  # (fzf) or that no distro ships at all (rg / bat / delta). All install
+  # user-scoped into ~/.local/bin, which the PATH block in link_shell_rc_paths
+  # already exports. Required tier: failures abort, same as install_tool_list.
+  step_fzf   || die "failed to install upstream fzf"
+  step_rg    || die "failed to install upstream ripgrep"
+  step_bat   || die "failed to install upstream bat"
+  step_delta || die "failed to install upstream delta"
+  step_tmux_upstream || die "failed to install upstream tmux"
+  step_vim_upstream  || die "failed to install upstream vim"
+}
+
+# Rust-toolchain target triples used by the ripgrep/bat/delta release naming.
+# musl is preferred on Linux for portability across glibc versions on servers
+# (the arm64 side of delta only ships gnu, so callers that need arm64 delta
+# fall back to gnu). Prints e.g. "x86_64-unknown-linux-musl" or aborts non-zero.
+rust_target_triple() {
+  local libc="${1:-musl}"
+  case "$(uname -s)-$(uname -m)" in
+    Linux-x86_64|Linux-amd64)    printf 'x86_64-unknown-linux-%s\n'  "$libc" ;;
+    Linux-aarch64|Linux-arm64)   printf 'aarch64-unknown-linux-%s\n' "$libc" ;;
+    Darwin-x86_64)               printf 'x86_64-apple-darwin\n' ;;
+    Darwin-arm64)                printf 'aarch64-apple-darwin\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+# Install $tool via Homebrew on macOS. On Linux this is a no-op that returns 1
+# so the caller falls through to its GitHub-release path.
+#   Rationale: on macOS Homebrew handles the intel/arm split, keeps the tool on
+#   `brew upgrade`, and is the pattern every other macOS install in this file
+#   already uses. On Linux distro packages of fzf/rg/bat/delta either lag
+#   badly (fzf) or are missing entirely, so we prefer the upstream release.
+install_via_brew_on_macos() {
+  local tool="$1" os pkg
+  os="$(detect_os)" || return 1
+  [[ "$os" == "macos" ]] || return 1
+  pkg="$(pkg_name_for macos "$tool")"
+  log "installing $tool via Homebrew (package: $pkg)…"
+  install_pkg macos "$pkg"
+}
+
+# ---------- Step 1a: upstream fzf ----------
+# fzf's distro packages trail upstream by many minor versions on server distros
+# (Ubuntu 22.04 ships 0.29, upstream is on 0.7x). Install the current release
+# tarball into ~/.local/bin.
+step_fzf() {
+  local existing installed
+  existing="$(command -v fzf 2>/dev/null || true)"
+  if tool_works fzf; then
+    installed="$(fzf --version 2>/dev/null)"
+    check_upstream_current fzf junegunn fzf "$installed" && return
+  elif [[ -n "$existing" ]]; then
+    warn "fzf is on PATH ($existing) but fails to run; reinstalling"
+  fi
+  install_via_brew_on_macos fzf && return
+  install_fzf_from_upstream || return 1
+}
+
+install_fzf_from_upstream() {
+  command -v curl >/dev/null 2>&1 || { warn "curl is required to install fzf"; return 1; }
+  command -v tar  >/dev/null 2>&1 || { warn "tar is required to install fzf";  return 1; }
+
+  local tag ver plat url
+  tag="$(github_latest_tag junegunn fzf)" || { warn "could not resolve latest fzf tag"; return 1; }
+  ver="${tag#v}"
+  case "$(uname -s)-$(uname -m)" in
+    Linux-x86_64|Linux-amd64)   plat=linux_amd64 ;;
+    Linux-aarch64|Linux-arm64)  plat=linux_arm64 ;;
+    Darwin-x86_64)              plat=darwin_amd64 ;;
+    Darwin-arm64)                plat=darwin_arm64 ;;
+    *) warn "fzf upstream install: unsupported platform $(uname -s)-$(uname -m)"; return 1 ;;
+  esac
+  url="https://github.com/junegunn/fzf/releases/download/${tag}/fzf-${ver}-${plat}.tar.gz"
+  # fzf's tarball puts the binary at the archive root, so INNER_PATH is just "fzf".
+  install_release_binary fzf "$url" tar.gz fzf
+}
+
+# ---------- Step 1b: upstream ripgrep ----------
+step_rg() {
+  local existing installed
+  existing="$(command -v rg 2>/dev/null || true)"
+  if tool_works rg; then
+    installed="$(rg --version 2>/dev/null | head -1)"
+    check_upstream_current rg BurntSushi ripgrep "$installed" && return
+  elif [[ -n "$existing" ]]; then
+    warn "rg is on PATH ($existing) but fails to run; reinstalling"
+  fi
+  install_via_brew_on_macos rg && return
+  install_rg_from_upstream || return 1
+}
+
+install_rg_from_upstream() {
+  command -v curl >/dev/null 2>&1 || { warn "curl is required to install ripgrep"; return 1; }
+  command -v tar  >/dev/null 2>&1 || { warn "tar is required to install ripgrep";  return 1; }
+
+  local tag triple url
+  tag="$(github_latest_tag BurntSushi ripgrep)" || { warn "could not resolve latest ripgrep tag"; return 1; }
+  triple="$(rust_target_triple musl)" || { warn "ripgrep upstream install: unsupported platform $(uname -s)-$(uname -m)"; return 1; }
+  # ripgrep tags carry no leading "v".
+  url="https://github.com/BurntSushi/ripgrep/releases/download/${tag}/ripgrep-${tag}-${triple}.tar.gz"
+  install_release_binary rg "$url" tar.gz "ripgrep-${tag}-${triple}/rg"
+}
+
+# ---------- Step 1c: upstream bat ----------
+step_bat() {
+  local existing installed
+  existing="$(command -v bat 2>/dev/null || true)"
+  if tool_works bat; then
+    installed="$(bat --version 2>/dev/null)"
+    check_upstream_current bat sharkdp bat "$installed" && return
+  elif [[ -n "$existing" ]]; then
+    warn "bat is on PATH ($existing) but fails to run; reinstalling"
+  fi
+  install_via_brew_on_macos bat && return
+  install_bat_from_upstream || return 1
+}
+
+install_bat_from_upstream() {
+  command -v curl >/dev/null 2>&1 || { warn "curl is required to install bat"; return 1; }
+  command -v tar  >/dev/null 2>&1 || { warn "tar is required to install bat";  return 1; }
+
+  local tag triple url
+  tag="$(github_latest_tag sharkdp bat)" || { warn "could not resolve latest bat tag"; return 1; }
+  triple="$(rust_target_triple musl)" || { warn "bat upstream install: unsupported platform $(uname -s)-$(uname -m)"; return 1; }
+  # bat tags carry a leading "v"; the asset directory keeps it.
+  url="https://github.com/sharkdp/bat/releases/download/${tag}/bat-${tag}-${triple}.tar.gz"
+  install_release_binary bat "$url" tar.gz "bat-${tag}-${triple}/bat"
+}
+
+# ---------- Step 1d: upstream delta ----------
+step_delta() {
+  local existing installed
+  existing="$(command -v delta 2>/dev/null || true)"
+  if tool_works delta; then
+    installed="$(delta --version 2>/dev/null)"
+    check_upstream_current delta dandavison delta "$installed" && return
+  elif [[ -n "$existing" ]]; then
+    warn "delta is on PATH ($existing) but fails to run; reinstalling"
+  fi
+  install_via_brew_on_macos delta && return
+  install_delta_from_upstream || return 1
+}
+
+install_delta_from_upstream() {
+  command -v curl >/dev/null 2>&1 || { warn "curl is required to install delta"; return 1; }
+  command -v tar  >/dev/null 2>&1 || { warn "tar is required to install delta";  return 1; }
+
+  local tag triple libc url
+  tag="$(github_latest_tag dandavison delta)" || { warn "could not resolve latest delta tag"; return 1; }
+  # delta only ships x86_64 as musl; the aarch64 Linux build is gnu-only.
+  case "$(uname -s)-$(uname -m)" in
+    Linux-aarch64|Linux-arm64) libc=gnu ;;
+    *)                         libc=musl ;;
+  esac
+  triple="$(rust_target_triple "$libc")" || { warn "delta upstream install: unsupported platform $(uname -s)-$(uname -m)"; return 1; }
+  # delta tags carry no leading "v".
+  url="https://github.com/dandavison/delta/releases/download/${tag}/delta-${tag}-${triple}.tar.gz"
+  install_release_binary delta "$url" tar.gz "delta-${tag}-${triple}/delta"
+}
+
+# ---------- Step 1e: upstream tmux (source build on Linux, brew on macOS) ----------
+# tmux upstream (tmux/tmux) ships source tarballs only, no prebuilt binaries.
+# Distro packages trail badly on server distros (Ubuntu 22.04: 3.2 vs. upstream
+# 3.7), and features like `set-clipboard on` -- which vim/.vimrc's OSC 52 flow
+# relies on -- want a recent tmux. So on Linux we ./configure && make and
+# install into $HOME/.local (no root needed). On macOS Homebrew is well ahead
+# of any tarball build we could do, so route through brew there.
+step_tmux_upstream() {
+  local existing installed
+  existing="$(command -v tmux 2>/dev/null || true)"
+  if tool_works tmux; then
+    installed="$(tmux -V 2>/dev/null)"
+    check_upstream_current tmux tmux tmux "$installed" && return
+  elif [[ -n "$existing" ]]; then
+    warn "tmux is on PATH ($existing) but fails to run; reinstalling"
+  fi
+  install_via_brew_on_macos tmux && return
+  install_tmux_from_source || return 1
+}
+
+# Build deps for a source tmux. Named per distro; on macOS this is unused
+# because step_tmux_upstream takes the brew path first.
+tmux_build_deps() {
+  local os="$1"
+  case "$os" in
+    debian) echo "build-essential pkg-config bison libevent-dev libncurses-dev" ;;
+    rhel)   echo "gcc make pkgconfig bison libevent-devel ncurses-devel" ;;
+    *)      return 1 ;;
+  esac
+}
+
+install_tmux_from_source() {
+  command -v curl >/dev/null 2>&1 || { warn "curl is required to build tmux"; return 1; }
+  command -v tar  >/dev/null 2>&1 || { warn "tar is required to build tmux";  return 1; }
+
+  local os tag url tmp srcdir dep deps
+  os="$(detect_os)" || return 1
+  # Pull in the build toolchain (gcc, libevent-devel, ncurses-devel, bison,
+  # pkg-config, make). Each dep goes through install_pkg individually so a
+  # single missing package name on an unusual distro doesn't sink the batch.
+  deps="$(tmux_build_deps "$os")" || { warn "tmux source build: unsupported OS '$os'"; return 1; }
+  for dep in $deps; do
+    install_pkg "$os" "$dep" || { warn "failed to install tmux build dep: $dep"; return 1; }
+  done
+
+  tag="$(github_latest_tag tmux tmux)" || { warn "could not resolve latest tmux tag"; return 1; }
+  # tmux tags carry no leading "v".
+  url="https://github.com/tmux/tmux/releases/download/${tag}/tmux-${tag}.tar.gz"
+
+  log "building tmux $tag from $url"
+  tmp="$(mktemp -d)"
+  # No RETURN trap (see install_go_from_upstream): clean up on each path instead.
+  if ! curl_dl "$url" "$tmp/tmux.tar.gz"; then
+    rm -rf "$tmp"
+    warn "download failed: $url"
+    return 1
+  fi
+  if ! tar -xzf "$tmp/tmux.tar.gz" -C "$tmp"; then
+    rm -rf "$tmp"
+    warn "failed to extract tmux $tag"
+    return 1
+  fi
+  srcdir="$tmp/tmux-${tag}"
+  [[ -x "$srcdir/configure" ]] || { rm -rf "$tmp"; warn "unexpected tmux archive layout: no configure in $srcdir"; return 1; }
+
+  # --prefix=$HOME/.local drops the binary at $HOME/.local/bin/tmux, which is
+  # already on PATH via link_shell_rc_paths -- so no root, no rc change.
+  if ! (
+    cd "$srcdir"
+    ./configure --prefix="$HOME/.local" >/dev/null \
+      && make -j"$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)" \
+      && make install
+  ); then
+    rm -rf "$tmp"
+    warn "tmux build failed"
+    return 1
+  fi
+  rm -rf "$tmp"
+  log "✓ installed tmux $("$HOME/.local/bin/tmux" -V 2>/dev/null) to $HOME/.local/bin"
+}
+
+# ---------- Step 1f: upstream vim (source build on Linux, brew on macOS) ----------
+# vim upstream (vim/vim) ships source tarballs only, no prebuilt binaries.
+# Distro packages trail badly on server distros (Ubuntu 22.04 ships 8.2, upstream
+# is on 9.1.x with 1000+ applied patches on top), and features referenced from
+# vim/.vimrc -- OSC 52 clipboard, popup windows, terminal colours -- have all
+# gained fixes since. On Linux we ./configure && make and install into
+# $HOME/.local (no root). On macOS Homebrew is well ahead of any tarball build
+# we could do locally, so route through brew there.
+step_vim_upstream() {
+  local existing installed
+  existing="$(command -v vim 2>/dev/null || true)"
+  if tool_works vim; then
+    installed="$(vim_installed_version)"
+    vim_check_upstream_current "$existing" "$installed" && return
+  elif [[ -n "$existing" ]]; then
+    warn "vim is on PATH ($existing) but fails to run; reinstalling"
+  fi
+  install_via_brew_on_macos vim && return
+  install_vim_from_source || return 1
+}
+
+# Print the installed vim version as MAJOR.MINOR.PATCH by combining the base
+# from line 1 of `vim --version` ("VIM - Vi IMproved 9.1 (...)") with the
+# highest number in the "Included patches: 1-1234[, 1236, ...]" line. Prints
+# an empty string when either piece is missing.
+vim_installed_version() {
+  local out base patch
+  out="$(vim --version 2>/dev/null)" || return 0
+  base="$(printf '%s\n' "$out" | head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1)"
+  # Included-patches line may be "1-1234" or "1-1234, 1236, 1240"; grab the
+  # numerically largest token so we compare against the true tip.
+  patch="$(printf '%s\n' "$out" \
+             | grep -E '^Included patches:' \
+             | grep -oE '[0-9]+' \
+             | sort -n | tail -1)"
+  [[ -n "$base" ]] || return 0
+  if [[ -n "$patch" ]]; then
+    printf '%s.%s\n' "$base" "$patch"
+  else
+    printf '%s\n' "$base"
+  fi
+}
+
+# Vim-specific mirror of check_upstream_current: needed because vim's version
+# is spread across two lines and does not match the "N.N.N" regex baked into
+# up_to_date_with_tag. Tags look like "v9.2.1125"; installed reduces to
+# "9.2.1125" via vim_installed_version. Returns 0 = skip, 1 = reinstall.
+vim_check_upstream_current() {
+  local existing="$1" installed="$2" tag norm_tag
+  tag="$(vim_latest_tag 2>/dev/null || true)"
+  if [[ -z "$tag" ]]; then
+    log "✓ vim already installed ($existing, $installed); upstream check failed, skipping"
+    return 0
+  fi
+  norm_tag="${tag#v}"
+  if [[ -n "$installed" && "$installed" == "$norm_tag" ]]; then
+    log "✓ vim $installed already at latest ($tag) at $existing"
+    return 0
+  fi
+  log "vim at $existing is ${installed:-unknown}; latest upstream is $tag -- reinstalling"
+  return 1
+}
+
+# Resolve the newest vim tag. Cannot use github_latest_tag: vim/vim publishes
+# no GitHub Releases, so /releases/latest 302s to /releases, not to
+# /releases/tag/<TAG>. The public tags.atom feed lists tags newest-first, is
+# unauthenticated and (unlike the tags REST API) has no rate limit.
+vim_latest_tag() {
+  local feed tag
+  feed="$(curl -fsSL 'https://github.com/vim/vim/tags.atom' 2>/dev/null)" || return 1
+  # Entries look like <id>tag:github.com,2008:Repository/40997482/v9.2.1125</id>,
+  # newest first. Grab the tag component of the first entry.
+  tag="$(printf '%s\n' "$feed" \
+           | grep -oE '<id>tag:github\.com,[0-9]+:Repository/[0-9]+/[^<]+</id>' \
+           | head -1 \
+           | sed -E 's|.*/([^<]+)</id>|\1|')"
+  [[ -n "$tag" ]] || return 1
+  printf '%s\n' "$tag"
+}
+
+# Build deps for a source vim. Named per distro; on macOS this is unused
+# because step_vim_upstream takes the brew path first.
+# ncurses gives us the terminfo lib vim links against; the rest is the minimal
+# toolchain a stock ./configure needs.
+vim_build_deps() {
+  local os="$1"
+  case "$os" in
+    debian) echo "build-essential pkg-config libncurses-dev" ;;
+    rhel)   echo "gcc make pkgconfig ncurses-devel" ;;
+    *)      return 1 ;;
+  esac
+}
+
+install_vim_from_source() {
+  command -v curl >/dev/null 2>&1 || { warn "curl is required to build vim"; return 1; }
+  command -v tar  >/dev/null 2>&1 || { warn "tar is required to build vim";  return 1; }
+
+  local os tag url tmp srcdir dep deps
+  os="$(detect_os)" || return 1
+  deps="$(vim_build_deps "$os")" || { warn "vim source build: unsupported OS '$os'"; return 1; }
+  for dep in $deps; do
+    install_pkg "$os" "$dep" || { warn "failed to install vim build dep: $dep"; return 1; }
+  done
+
+  tag="$(vim_latest_tag)" || { warn "could not resolve latest vim tag"; return 1; }
+  # vim tags carry a leading "v"; the release tarball URL keeps it.
+  url="https://github.com/vim/vim/archive/refs/tags/${tag}.tar.gz"
+
+  log "building vim $tag from $url"
+  tmp="$(mktemp -d)"
+  # No RETURN trap (see install_go_from_upstream): clean up on each path instead.
+  if ! curl_dl "$url" "$tmp/vim.tar.gz"; then
+    rm -rf "$tmp"
+    warn "download failed: $url"
+    return 1
+  fi
+  if ! tar -xzf "$tmp/vim.tar.gz" -C "$tmp"; then
+    rm -rf "$tmp"
+    warn "failed to extract vim $tag"
+    return 1
+  fi
+  # GitHub source-tag tarballs extract into <repo>-<tag-without-v>/.
+  srcdir="$tmp/vim-${tag#v}"
+  [[ -x "$srcdir/configure" ]] || { rm -rf "$tmp"; warn "unexpected vim archive layout: no configure in $srcdir"; return 1; }
+
+  # --prefix=$HOME/.local drops the binary at $HOME/.local/bin/vim, which is
+  # already on PATH via link_shell_rc_paths -- so no root, no rc change.
+  # --with-features=huge matches what every mainstream distro ships and keeps
+  # +clipboard/+terminal/+popupwin/+eval on. --enable-multibyte is default in
+  # 9.x but harmless to pass explicitly.
+  if ! (
+    cd "$srcdir"
+    ./configure --prefix="$HOME/.local" \
+                --with-features=huge \
+                --enable-multibyte \
+                >/dev/null \
+      && make -j"$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)" \
+      && make install
+  ); then
+    rm -rf "$tmp"
+    warn "vim build failed"
+    return 1
+  fi
+  rm -rf "$tmp"
+  log "✓ installed vim $("$HOME/.local/bin/vim" --version 2>/dev/null | head -1) to $HOME/.local/bin"
+}
 
 # ---------- Step 2: optional tools ----------
 step_optional() {
@@ -686,9 +1192,12 @@ fi
 if [ -d "$HOME/.bun/bin" ]; then
   case ":$PATH:" in *":$HOME/.bun/bin:"*) ;; *) export PATH="$PATH:$HOME/.bun/bin" ;; esac
 fi
-# pipx: user-scoped Python CLIs (tldr, etc.) live in ~/.local/bin
+# pipx / user-scoped installs land in ~/.local/bin. PREPEND (not append) so our
+# upstream fzf/rg/bat/delta and source-built tmux shadow older copies the distro
+# may have dropped on /usr/local/bin or /usr/bin -- that's the whole point of
+# building/installing newer versions here.
 if [ -d "$HOME/.local/bin" ]; then
-  case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$PATH:$HOME/.local/bin" ;; esac
+  case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$PATH" ;; esac
 fi
 EOF
   }
