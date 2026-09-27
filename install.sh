@@ -294,7 +294,11 @@ install_pkg() {
       ;;
     macos)
       command -v brew >/dev/null 2>&1 || { warn "Homebrew not found. Install from https://brew.sh"; return 1; }
-      brew install "$pkg"
+      # NONINTERACTIVE=1 suppresses the "Do you want to proceed? [y/n]" prompt
+      # Homebrew now shows before installing a formula together with its
+      # dependencies. Without this, the installer would block on stdin the
+      # first time a brew formula pulls in a new dep (e.g. rg → pcre2).
+      NONINTERACTIVE=1 brew install "$pkg"
       ;;
     *)
       # Guards against an empty $os from a failed detect_os, which would
