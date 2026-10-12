@@ -9,8 +9,11 @@ alias f=fzf
 # etc. otherwise get encoded as CSI 27;5;NN~ and leak into the shell line buffer).
 # Inside tmux, wrap the sequence in DCS passthrough (\ePtmux;...\e\\) so tmux
 # forwards it to the outer terminal instead of swallowing it.
-if [ -n "$TMUX" ]; then
-  printf '\ePtmux;\e\e[>4;0m\e\\' 2>/dev/null
-else
-  printf '\e[>4;0m' 2>/dev/null
+# Only touch terminal modes in interactive shells attached to a TTY
+if [[ $- == *i* ]] && [ -t 1 ]; then
+  if [ -n "$TMUX" ]; then
+    printf '\ePtmux;\e\e[>4;0m\e\\'
+  else
+    printf '\e[>4;0m'
+  fi
 fi
