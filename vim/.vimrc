@@ -282,7 +282,15 @@ call plug#begin()
   Plug 'inkarkat/vim-ReplaceWithRegister'
   Plug 'junegunn/fzf', { 'do': { -> fzf#install() } }
   Plug 'junegunn/fzf.vim'
+  Plug 'justinmk/vim-sneak'
 call plug#end()
+
+
+" --------------
+" sneak.vim
+" --------------
+" Show label mode: tags matches with letters so you can jump directly
+let g:sneak#label = 1
 
 
 " --------------
