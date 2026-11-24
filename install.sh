@@ -294,11 +294,13 @@ install_pkg() {
       ;;
     macos)
       command -v brew >/dev/null 2>&1 || { warn "Homebrew not found. Install from https://brew.sh"; return 1; }
-      # NONINTERACTIVE=1 suppresses the "Do you want to proceed? [y/n]" prompt
-      # Homebrew now shows before installing a formula together with its
-      # dependencies. Without this, the installer would block on stdin the
-      # first time a brew formula pulls in a new dep (e.g. rg → pcre2).
-      NONINTERACTIVE=1 brew install "$pkg"
+      # Newer Homebrew prints "Would upgrade ... Do you want to proceed with
+      # the installation? [y/n]" when `brew install` hits an already-installed
+      # but outdated formula. NONINTERACTIVE=1 does not silence that prompt,
+      # so pipe `yes` in to auto-answer. `|| true` on the yes side swallows
+      # the SIGPIPE (141) exit that pipefail would otherwise propagate as the
+      # pipeline's status once brew closes the read end.
+      { yes 2>/dev/null || true; } | NONINTERACTIVE=1 brew install "$pkg"
       ;;
     *)
       # Guards against an empty $os from a failed detect_os, which would
