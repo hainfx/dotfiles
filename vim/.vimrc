@@ -66,8 +66,6 @@ set incsearch
 " set smartcase
 " Searches are case-sensitive
 set noignorecase
-" Treat most regex metacharacters as literal in patterns
-set nomagic
 " *: search word under cursor but stay on current match
 nnoremap * *N
 " n: next match and center the screen
